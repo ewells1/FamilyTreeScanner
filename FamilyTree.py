@@ -1,9 +1,11 @@
 import requests
-import bs4
 import re
 import json
 
-from private import username, password, root_person_link
+import bs4
+import pandas
+
+from private import *
 CURRENT_YEAR = 2017
 
 
@@ -19,6 +21,7 @@ CURRENT_YEAR = 2017
        Spouses
        Children
        Birth year
+       Birth place
        Death year
        Sex
 '''
@@ -35,21 +38,24 @@ class FamilyTree:
         tree = open(saved_tree)
         self.people = json.load(tree)
         self.root_person = list(self.people.keys())[0]
+        # print(self.people[self.root_person]['name'])  # debug
         # print(self.root_person)  # debug
         tree.close()
 
-    '''Scrapes Ancestry.com, starting at root_person_link, to build family tree'''
-    def generate_tree(self, root_person, user, pw):
+    '''Scrapes Ancestry.com, starting at root_person_link, to build family tree
+       direct_ancestors_only ignores siblings for a smaller tree'''
+    def generate_tree(self, root_person, user, pw, direct_ancestors_only=False):
+        self.root_person = get_id_from_url(root_person)
         self.session = requests.session()
         self.people = {}
         login_data = {'username': user, 'password': pw, 'submit': 'loginButton'}
         self.session.post('https://www.ancestry.com/secure/login?signUpReturnUrl=https%3A%2F%2Fwww.ancestry.com%2Fcs%2Foffers%2Fsubscribe%3Fsub%3D1', data=login_data)
 
-        self.add_person(root_person)
+        self.add_person(root_person, direct_ancestors_only)
 
     '''Adds people recursively, starting with the given root person
        Stores information about each person and adds relatives not already in the tree'''
-    def add_person(self, person_link):
+    def add_person(self, person_link, direct_ancestors_only=False):
         person = {}
         source = self.session.get(person_link)
         soup = bs4.BeautifulSoup(source.text, 'lxml')
@@ -59,8 +65,8 @@ class FamilyTree:
         print(person['name'])  # debug
 
         person['parents'] = []
-        person['siblings'] = []
         person['spouses'] = []
+        person['siblings'] = []
         person['children'] = []
         family = [str(member) for member in soup.find_all('a', {'class': 'factItemFamily'})]
         # print(family)  # debug
@@ -69,23 +75,34 @@ class FamilyTree:
             person_id = get_id_from_url(link)
             if 'ResearchParent' in member:
                 person['parents'].append(person_id)
-            elif 'ResearchSibling' in member:
-                person['siblings'].append(person_id)
+                if person_id not in self.people:
+                    self.add_person(link, direct_ancestors_only)
             elif 'ResearchSpouse' in member:
                 person['spouses'].append(person_id)
-            elif 'ResearchChild' in member:
-                person['children'].append(person_id)
-            else:
-                # If we get here, I've made a bad assumption about my input
-                print('problem with add person', person['name'], member)
-            if person_id not in self.people:
-                self.add_person(link)
+                if person_id not in self.people:
+                    self.add_person(link, direct_ancestors_only)
+            elif not direct_ancestors_only:
+                if 'ResearchSibling' in member:
+                    person['siblings'].append(person_id)
+                elif 'ResearchChild' in member:
+                    person['children'].append(person_id)
+                else:
+                    # If we get here, I've made a bad assumption about my input
+                    print('problem with add person', person['name'], member)
+                if person_id not in self.people:
+                    self.add_person(link, direct_ancestors_only)
 
         birth = soup.find('span', attrs={'class': 'birthDate'})
         if birth:
             person['birth_year'] = extract_year(str(birth))
         else:
             person['birth_year'] = 'Unknown'
+        birth_place = soup.find('span', attrs={'class': 'birthPlace'})
+        if birth_place:
+            person['birth_place'] = extract_text(str(birth_place))
+            # print(person['birth_place'])
+        else:
+            person['birth_place'] = 'Unknown'
 
         death = soup.find('span', attrs={'class': 'deathDate'})
         if death:
@@ -103,14 +120,35 @@ class FamilyTree:
         self.people[get_id_from_url(person_link)] = person
 
     '''Saves the current family tree as a json file'''
-    def save(self):
-        family_tree = open('FamilyTree.json', 'w')
+    def save(self, outfile='FamilyTree.json'):
+        family_tree = open(outfile, 'w')
         json.dump(self.people, family_tree, indent=4)
         family_tree.close()
 
     '''Returns the number of total people in the tree'''
     def num_people(self):
         return len(self.people)
+
+    '''Returns the number of direct ancestors given a root person.
+       If no root person given, assumes tree root person'''
+    def num_direct_ancestors(self, root_person=None):
+        if root_person is None:
+            root_person = self.root_person
+        # print(self.people[root_person]['name'])  # debug
+        ret = 1
+        for person in self.people[root_person]['parents']:
+            ret += self.num_direct_ancestors(person)
+        return ret
+
+    '''Finds the length of the longest chain of ancestors from the root person'''
+    def longest_line(self, root_person=None):
+        if root_person is None:
+            root_person = self.root_person
+        # print(self.people[root_person]['name'])  # debug
+        ret = 1
+        for person in self.people[root_person]['parents']:
+            ret += self.num_direct_ancestors(person)
+        return ret
 
     '''Goes through people in tree checking for possible errors. Errors scanned for:
            Child born after a parent's death
@@ -149,6 +187,50 @@ class FamilyTree:
                                                                       self.people[person]['birth_year']), 'years')
             # TODO: Look for duplicates
 
+    '''Returns a list of all lines that lead to the root person. Hopefully to be used for more mapping projects'''
+    def family_paths(self, num_generations, root_person=None):
+        if root_person is None:
+            root_person = self.root_person
+        ret = []
+        parents = self.people[root_person]['parents']
+        if num_generations > 1:
+            for person in parents:
+                for path in self.family_paths(num_generations - 1, person):
+                    ret.append(path + [self.people[root_person]['birth_place']])
+        if num_generations == 1 or len(parents) < 2:
+            ret.append([self.people[root_person]['birth_place']])
+        return ret
+
+    '''Returns a dataframe with information about everyone in the tree excluding relationships to others in tree'''
+    def dataframe(self, fields='all'):
+        if fields == 'all':
+            fields = ['name', 'birth_year', 'birth_place', 'death_year', 'sex']
+        people = {field: [self.people[person][field] for person in self.people] for field in fields}
+        print(people)
+        ret = pandas.DataFrame(people)
+        return ret
+
+    '''Returns a dataframe specifically to be used for plotting birth places on a map'''
+    def map_dataframe(self, num_generations, root_person=None):
+        if root_person is None:
+            root_person = self.root_person
+        latlong = lat_and_long(self.people[root_person]['birth_place'])
+        if latlong:
+            row = pandas.DataFrame({'Name': self.people[root_person]['name'],
+                                    'Generation': num_generations,
+                                    'Lattitude': latlong[0],
+                                    'Longitude': latlong[1]}
+                                   , index=[0])
+        else:
+            # print("Can't get coordinates for", self.people[root_person]['name'], "at",
+            #       self.people[root_person]['birth_place'])  # debug - s I can go fix in my tree later
+            row = pandas.DataFrame({})
+        parents = self.people[root_person]['parents']
+        if num_generations > 1:
+            for parent in parents:
+                row = pandas.concat([row, self.map_dataframe(num_generations-1, root_person=parent)])
+        return row
+
 
 '''Extracts a person's ID from the URL for their profile'''
 def get_id_from_url(url):
@@ -171,11 +253,38 @@ def extract_year(html):
         print('problem in extract year', html)  # debug - to see if this is something that requires more error handling
 
 
+'''Extracts text from between html markup'''
+def extract_text(html):
+    loc = re.search(r'>(.+)</', html)
+    if loc:
+        return loc.group(1)
+    else:
+        print('problem in extract text', html)  # debug - to see if this is something that requires more error handling
+        return 'Unknown'
+
+
+'''Uses google maps geocoder api to look up the lattitude and longitude of a city'''
+def lat_and_long(address):
+    url = 'https://maps.googleapis.com/maps/api/geocode/json'
+    params = {'sensor': 'false', 'address': address, 'key': google_api_key}
+    r = requests.get(url, params=params)
+    results = r.json()['results']
+    if len(results) > 0:
+        loc = results[0]['geometry']['location']
+        return loc['lat'], loc['lng']
+
+
 if __name__ == '__main__':
     # print(get_id_from_url(root_person_link))  # debug - to check if this function works correctly
     ft = FamilyTree()
-    # ft.generate_tree(root_person_link, username, password)
-    ft.load_tree()
+    ft.generate_tree(root_person_link, username, password, direct_ancestors_only=True)
+    # ft.load_tree('FamilyTree.json')
     print(ft.num_people(), 'people in this tree\n')
-    # ft.save()
-    ft.sanity_check()
+    print(ft.num_direct_ancestors(), 'direct ancestors\n')
+    ft.save()
+    # ft.sanity_check()
+    # paths = ft.family_paths(30)
+    # print('Shortest path found:', min(len(p) for p in paths))
+    # print('Longest path found:', max(len(p) for p in paths))
+    # chart = ft.dataframe()
+    # print(chart)
