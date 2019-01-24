@@ -6,7 +6,7 @@ import bs4
 import pandas
 
 from private import *
-CURRENT_YEAR = 2017
+CURRENT_YEAR = 2018
 
 
 '''A Python representation of a family tree where people are represented as dictionaries and then accessed from the
@@ -77,13 +77,11 @@ class FamilyTree:
                 person['parents'].append(person_id)
                 if person_id not in self.people:
                     self.add_person(link, direct_ancestors_only)
-            elif 'ResearchSpouse' in member:
-                person['spouses'].append(person_id)
-                if person_id not in self.people:
-                    self.add_person(link, direct_ancestors_only)
             elif not direct_ancestors_only:
                 if 'ResearchSibling' in member:
                     person['siblings'].append(person_id)
+                elif 'ResearchSpouse' in member:
+                    person['spouses'].append(person_id)
                 elif 'ResearchChild' in member:
                     person['children'].append(person_id)
                 else:
@@ -100,9 +98,8 @@ class FamilyTree:
         birth_place = soup.find('span', attrs={'class': 'birthPlace'})
         if birth_place:
             person['birth_place'] = extract_text(str(birth_place))
+            person['birth_coordinates'] = lat_and_long(person['birth_place'])
             # print(person['birth_place'])
-        else:
-            person['birth_place'] = 'Unknown'
 
         death = soup.find('span', attrs={'class': 'deathDate'})
         if death:
@@ -113,6 +110,11 @@ class FamilyTree:
                 person['death_year'] = 'Living'
             else:
                 person['death_year'] = 'Unknown'
+        death_place = soup.find('span', attrs={'class': 'deathPlace'})
+        if death_place:
+            person['death_place'] = extract_text(str(death_place))
+            person['death_coordinates'] = lat_and_long(person['death_place'])
+            # print(person['death_place'])
 
         person['sex'] = str(soup.find(string=['Female', 'Male']))
 
@@ -214,16 +216,17 @@ class FamilyTree:
     def map_dataframe(self, num_generations, root_person=None):
         if root_person is None:
             root_person = self.root_person
-        latlong = lat_and_long(self.people[root_person]['birth_place'])
+        # latlong = lat_and_long(self.people[root_person]['birth_place'])
+        latlong = self.people[root_person]['birth_coordinates']
         if latlong:
             row = pandas.DataFrame({'Name': self.people[root_person]['name'],
                                     'Generation': num_generations,
                                     'Lattitude': latlong[0],
-                                    'Longitude': latlong[1]}
-                                   , index=[0])
+                                    'Longitude': latlong[1]},
+                                   index=[0])
         else:
             # print("Can't get coordinates for", self.people[root_person]['name'], "at",
-            #       self.people[root_person]['birth_place'])  # debug - s I can go fix in my tree later
+            #       self.people[root_person]['birth_place'])  # debug - so I can go fix in my tree later
             row = pandas.DataFrame({})
         parents = self.people[root_person]['parents']
         if num_generations > 1:
@@ -231,20 +234,35 @@ class FamilyTree:
                 row = pandas.concat([row, self.map_dataframe(num_generations-1, root_person=parent)])
         return row
 
+    def get_people(self):
+        return [person['name'] for person in self.people]
 
-'''Extracts a person's ID from the URL for their profile'''
+    def look_up_city(self, city):
+        latlong = list(lat_and_long(city))
+        for person in self.people.values():
+            # print(person['name'], latlong, person['birth_coordinates'])
+            if 'birth_coordinates' in person and person['birth_coordinates'] == latlong:
+                print(person['name'], 'was born in', city, 'in', str(person['birth_year']))
+            if 'death_coordinates' in person and person['death_coordinates'] == latlong:
+                print(person['name'], 'died in', city, 'in', str(person['death_year']))
+
+    def verify_with_book(self):
+        pass
+
+
+# Extracts a person's ID from the URL for their profile
 def get_id_from_url(url):
     person_id = re.search(r'person/(\d+)', url).group(1)
     return person_id
 
 
-'''Extracts the URL for a person from a piece of html returned from bs4'''
+# Extracts the URL for a person from a piece of html returned from bs4
 def get_url_from_html(html):
     href = re.search(r'href="(.+?)"', html)
     return href.group(1)
 
 
-'''Extracts a year from a piece of html returned from bs4'''
+# Extracts a year from a piece of html returned from bs4
 def extract_year(html):
     year = re.search(r'\d{4}', html)
     if year:
@@ -253,7 +271,7 @@ def extract_year(html):
         print('problem in extract year', html)  # debug - to see if this is something that requires more error handling
 
 
-'''Extracts text from between html markup'''
+# Extracts text from between html markup
 def extract_text(html):
     loc = re.search(r'>(.+)</', html)
     if loc:
@@ -263,28 +281,39 @@ def extract_text(html):
         return 'Unknown'
 
 
-'''Uses google maps geocoder api to look up the lattitude and longitude of a city'''
+# Uses google maps geocoder api to look up the lattitude and longitude of a city
 def lat_and_long(address):
-    url = 'https://maps.googleapis.com/maps/api/geocode/json'
-    params = {'sensor': 'false', 'address': address, 'key': google_api_key}
+    url = 'http://open.mapquestapi.com/geocoding/v1/address'
+    params = {'location': address, 'key': mapquest_key, 'inFormat': 'kvp', 'outFormat': 'json', 'thumbMaps': 'false'}
     r = requests.get(url, params=params)
+    # print(r.json())
     results = r.json()['results']
     if len(results) > 0:
-        loc = results[0]['geometry']['location']
+        loc = results[0]['locations'][0]['latLng']
         return loc['lat'], loc['lng']
+    else:
+        print(r.json())
 
 
 if __name__ == '__main__':
     # print(get_id_from_url(root_person_link))  # debug - to check if this function works correctly
     ft = FamilyTree()
-    ft.generate_tree(root_person_link, username, password, direct_ancestors_only=True)
-    # ft.load_tree('FamilyTree.json')
+    # ft.generate_tree(root_person_link, username, password, direct_ancestors_only=True)
+    ft.load_tree('FamilyTree.json')
     print(ft.num_people(), 'people in this tree\n')
-    print(ft.num_direct_ancestors(), 'direct ancestors\n')
-    ft.save()
+    # print(ft.num_direct_ancestors(), 'direct ancestors\n')
+    # ft.save()
     # ft.sanity_check()
     # paths = ft.family_paths(30)
     # print('Shortest path found:', min(len(p) for p in paths))
     # print('Longest path found:', max(len(p) for p in paths))
     # chart = ft.dataframe()
     # print(chart)
+    # print(lat_and_long('Granby, Massachusetts, USA'))
+
+    while True:
+        city = input('Look up a city: ')
+        if city.lower() == 'quit':
+            break
+        ft.look_up_city(city)
+        print()
